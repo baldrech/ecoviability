@@ -1,0 +1,254 @@
+---
+title: todo list
+author: RF
+editor_options: 
+  chunk_output_type: console
+---
+
+
+For this project I need:
+
+some code running the model in R with just changing the effort. Could have a slot to input the param object
+
+use optimparallel to find solution?
+run the model to find best ecological threshold
+
+the key is to get some dataframe of effort combination and then treat it in the app
+however if the dataframe is too big it doesn't work so need to create a subset
+
+could remake the app so the user decides the effort and it runs the model / display results
+
+and on the side an algo to find the solution that require lots of computing and parallel power
+
+for the algo I need to write a function that check biom threshold agains value and eco threshold against value and return a value that I need to minimise or maximise for the optim parallel threshold
+
+Actually if biom threshold is not met > return 0
+If eco threshold is not met > return difference to positive as a negative number
+otherwise return sums of revenue 
+the algo looks for a maxima in this
+
+
+What is done
+
+- function that runs the model for any combination of fleet effort (usually a multiplier of base effort from 2019)
+
+- app reading an RDS object being a dataframe of effort combination and expected biomass caught
+
+- from the dataframe the app calculate how many species will reach the biomass threshold (user input) and what effort combination yield a economic and social threshold (user inputed)
+
+- the app will be slow if the dataframe is huge
+
+- can run a simulation with user input effort from the app (overwrite any loaded object)
+
+TODO
+
+- make equation being available to edit by user
+
+- algo looking for best solution without the app
+
+
+
+
+
+Email:
+
+Apologies for the delay in my work. After not being able to reach an aggreement about the fisheries output for so long I moved my focus to other jobs and then coulnot find time to finalise the project.
+On top of that having the 14 fisheries together made it really hard to process any kind of output through a shinyapp so I decided to reframe the entire project and make it completly modulable for any need you might have in the future with this app.
+
+Therefore you will find a documentation on how to use an algorithm which loops the surplus model, which might need to get updated every time the surplus model is. This runs in parallel and can be done to find solution analytically. 
+
+The shiny app is also avaialble once you have selected a desiered effort space for all fisheries. This allows to further refine the solution and see the economic impact. The app contains the functions calculating the three threshold and can be updated / changed if necessary.
+The input can also be given raw with basic metrics or alredy processed as with Shawn ouptput. THis is in fact a frame being able to take any equation and output stuff so you can use that for anything
+
+Once again, apologies for the delay, this project is not exactly what you need and has taken way more time than the original one month contract but hopefully it will help you progress towards a better eco viability of the sessh
+
+# Test running the model
+
+```{r}
+source("BareCode_MSPM_new/Tools.R")
+# remotes::install_github("baldrech/RcppSimEffort")
+library(RcppSimEffort)
+
+groups <- 'BareCode_MSPM_new/data/Main_metier_Ratpack_clean_FishBase.csv'
+P.prey <- 'BareCode_MSPM_new/data/Pprey_Ratpack_Atlantis.csv'
+E.Fleet <- 'BareCode_MSPM_new/data/Effort_metier_Ratpack.csv'
+# C.Fleet <-'BareCode_MSPM_new/data/Catch_Ratpack_metier.csv'
+# External_catch <- 'BareCode_MSPM_new/data/East_Total_Extra_Catch.csv'
+
+get(load("res/Output.RData"))
+estimation.MSP <- output_NR$out
+
+# biom0 <- readRDS("res/biom0.RDS") # loading pristine state
+
+
+# effort_seq <-seq(0,4,length.out = 14)
+effort_seq <- c(0.5,1)
+
+effortMatrix <- rep(effort_seq[1],14)
+
+
+
+
+
+# function used in the foreach
+simLoop <- function(effortMatrix, estimation.MSP, groups, P.prey, E.Fleet)
+{
+  # from MSP
+K      <- exp(estimation.MSP$Parameters$logK)
+r      <- exp(estimation.MSP$Parameters$logr)
+lambda <- exp(estimation.MSP$Parameters$loglambda)
+qflt   <- estimation.MSP$q
+C.biom  <- estimation.MSP$Report
+
+## Effort Arrangement
+EFleet <- read.csv(E.Fleet) ## Predators in columns and prey on rows
+order.flt <- colnames(EFleet[, -1])
+Nflts <- length(order.flt)
+
+# setting up multiplier vector for the effort
+mult <- rep(1,length(order.flt))
+# mult   <- mult[1 : length(order.flt)]
+# Effort <- colMeans(tail(EFleet[, -1]), na.rm = TRUE)  * mult
+# predator prey interactions
+Pprey  <- as.matrix(read.csv(P.prey, row.names = 1, stringsAsFactors = FALSE)) ## Predators in columns and prey on rows
+Pprey[is.na(Pprey)] <-0
+main      <- read.csv(groups)
+order.sps <- as.character(main$Code)  ## This will set the species order
+Nsp <- length(order.sps)
+
+Xp = main$Xp
+mu = main$mu
+Eff = main$Efficiency
+
+start <- "Current Estimation" #"At MSY Level" ## it also can be 'Current Estimation'
+  
+  
+  mult   <- effortMatrix[1 : length(order.flt)]
+  Effort <- colMeans(tail(EFleet[, -1]), na.rm = TRUE)  * mult
+
+
+res <- .sim.eff(K = K,
+                r = r, 
+                qflt = qflt,
+                Time = 5000, 
+                Effort = Effort, 
+                Nsp = Nsp,
+                Nflts = Nflts,
+                p.asym = lambda, 
+                Pprey = Pprey, 
+                Xp = Xp, 
+                mu = mu, 
+                Eff = Eff, 
+                np = 2, 
+                predation = FALSE, 
+                v.noise = TRUE, 
+                step = 0.1, 
+                C.biom = C.biom, 
+                start = start)
+
+names(effortMatrix) <- order.flt
+
+biores <- data.frame("biomass" = res$B3, "production" = res$P3, "species" = order.sps)
+effortOutput <- matrix(rep(effortMatrix, Nsp), nrow = Nsp, byrow = T)
+colnames(effortOutput) <- order.flt
+return(cbind(biores, effortOutput))
+}
+
+res <- simLoop(effortMatrix = effortMatrix, estimation.MSP = estimation.MSP, groups = groups, P.prey = P.prey, E.Fleet = E.Fleet)
+```
+
+
+```{r}
+# Doing it in parallel with only 2 efforts
+
+library(foreach)
+library(doParallel)
+
+global_effort <- c(.5,1)
+effort_combinations <- as.matrix(expand.grid(replicate(14, global_effort, simplify = FALSE)))
+
+num_cores <- detectCores() - 2
+cl <- makeCluster(num_cores)
+registerDoParallel(cl)
+
+# Load the required package on each worker
+clusterEvalQ(cl, library(RcppSimEffort))
+
+# Export necessary objects to workers
+clusterExport(cl, c("global_effort", "simLoop"))
+
+# # Parallel execution of simLoop
+# results <- foreach(
+#   effortVal = global_effort,
+#   .combine = rbind,
+#   .export = c("estimation.MSP", "groups", "P.prey", "E.Fleet")
+# ) %dopar% {
+#   effortMatrix <- rep(effortVal, times = 14)
+#   simLoop(
+#     effortMatrix,
+#     estimation.MSP = estimation.MSP,
+#     groups = groups,
+#     P.prey = P.prey,
+#     E.Fleet = E.Fleet
+#   )
+# }
+
+# Parallel execution of simLoop
+results <- foreach(row = 1:nrow(effort_combinations), .combine = rbind) %dopar% {
+  effortMatrix <- effort_combinations[row, ]
+  simLoop(
+    effortMatrix = effortMatrix,
+    estimation.MSP = estimation.MSP,
+    groups = groups,
+    P.prey = P.prey,
+    E.Fleet = E.Fleet
+  )
+}
+
+# Stop the parallel cluster
+stopCluster(cl)
+
+# adding pristine biomass
+biom0 <- readRDS("res/biom0_2019.RDS")
+results$biom0 <- rep(biom0, dim(effort_combinations)[1])
+# adding unique ID to effort combinations
+main      <- read.csv(groups)
+results$effortID <- rep(1:dim(effort_combinations)[1], each = dim(main)[1])
+# shortening names for QoL
+colnames(results)[4:17] <- c("FLTDS102030","FLTDS60","FLTT10","FLTT2060","FLTT30",
+                             "HK_LIG","Mixed","MWOT102060","MWOT30","TLIG",
+                             "TRED","WHSDS20","WHSDS60","WHST1020")
+
+saveRDS(results,"res/testRes.rds")
+
+
+
+```
+
+Run the app
+
+
+```{r}
+# object <- readRDS("res/currentEffort.rds") # this object is already set up with id and biom0
+# object <- readRDS("res/testRes.rds")
+# object <- object[1:90,]
+# object <- readRDS("res/currentEffort.rds")
+groups <- 'BareCode_MSPM_new/data/Main_metier_Ratpack_clean_FishBase.csv'
+P.prey <- 'BareCode_MSPM_new/data/Pprey_Ratpack_Atlantis.csv'
+E.Fleet <- 'BareCode_MSPM_new/data/Effort_metier_Ratpack.csv'
+# C.Fleet <-'BareCode_MSPM_new/data/Catch_Ratpack_metier.csv'
+# External_catch <- 'BareCode_MSPM_new/data/East_Total_Extra_Catch.csv'
+
+get(load("res/Output.RData"))
+estimation.MSP <- output_NR$out
+
+
+
+qflt   <- estimation.MSP$q
+currentF <- as.numeric(read.csv(E.Fleet)[34,-1])
+
+shiny::runApp("app.R")
+```
+
+app works, the issue is that it is slow when handling lots of data
+
