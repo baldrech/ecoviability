@@ -459,7 +459,7 @@ server = function(input, output) {
                   input$WHSDS20_mult,
                   input$WHSDS60_mult,
                   input$WHST1020_mult)
-
+    
     res <- simLoop(effortMatrix = mult_vec, estimation.MSP = estimation.MSP,
                    groups = groups, P.prey = P.prey, E.Fleet = E.Fleet)
     # TODO less hardcoding
@@ -711,63 +711,66 @@ server = function(input, output) {
   GOS_reactive <- eventReactive(input$runEco, {
     # the dataframe of effort combinations is filtered to keep only viable ecological values
     object_alive <- filter(loaded_object(), effortID %in% biom_list()[[3]])
-
+    
     # catch per metier
     CMS <- computeCMS(object_alive = object_alive,
                       qflt = qflt, 
                       currentF = currentF)
-    
-    print(dim(CMS))
-    print(class(CMS))
-
     # freight cost
     cFre <- computeFRE(CMS = CMS, 
                        object_alive = object_alive, 
                        ecoParam = ecoParam())
     
-class(ecoParam())
-print(dim(cFre))
-print(class(cFre))
+    # gross value per species
+    GVL_list <- computeGVL(CMS = CMS, 
+                           object_alive = object_alive,
+                           fishPrice = fishPrice())
+    GVL <- GVL_list[[1]]
     
-### Output checks in the app (just using first effort combination to not overflow)
-CMS_sp <- apply(CMS[,1:9], 2, sum)
-names(CMS_sp) <- c("FLT", "GRE", "LIG", "MOW", "RED", "SQD", "TRS", "TRT", "WHS")
-CMS_df <- as.data.frame(CMS[,1:9])
-colnames(CMS_df) <- c("FLT", "GRE", "LIG", "MOW", "RED", "SQD", "TRS", "TRT", "WHS")
-CMS_df <- tibble::add_column(CMS_df, "Metier" = rownames(CMS_df), .before = "FLT")
-qflt_df <- as.data.frame(qflt)
-colnames(qflt_df) <- c("FLT", "GRE", "LIG", "MOW", "RED", "SQD", "TRS", "TRT", "WHS")
-qflt_df <- tibble::add_column(qflt_df, "Metier" = rownames(qflt_df), .before = "FLT")
-cFre_df <- ecoParam()$cFre * 1000 * rowSums(CMS) #  not working if more than one combination I think
+    # gross operative surplus
+    GOS <- computeGOS(GVL = GVL, 
+                      cFre = cFre, 
+                      object_alive = object_alive, 
+                      ecoParam = ecoParam(), 
+                      shotNumber = shotNumber(),
+                      vesselNumber = vesselNumber())
     
-    # this is the gross value per species
-    GVL_sp <- apply(t(CMS),2, function(x)x*fishPrice())
-    # now need to sum into GVL while separating each group of effort
-    # formatting to aggregate
-    GVL_df <- as.data.frame(GVL_sp)
-    GVL_df$effortID <- object_alive$effortID
+    # wages
+    wage <- computeWage(GVL = GVL, 
+                             ecoParam = ecoParam(), 
+                             vesselNumber = vesselNumber())
+
+    ### Output checks in the app (just using first effort combination to not overflow)
+    CMS_sp <- apply(CMS[,1:9], 2, sum)
+    names(CMS_sp) <- c("FLT", "GRE", "LIG", "MOW", "RED", "SQD", "TRS", "TRT", "WHS")
+    CMS_df <- as.data.frame(CMS[,1:9])
+    colnames(CMS_df) <- c("FLT", "GRE", "LIG", "MOW", "RED", "SQD", "TRS", "TRT", "WHS")
+    CMS_df <- tibble::add_column(CMS_df, "Metier" = rownames(CMS_df), .before = "FLT")
+    qflt_df <- as.data.frame(qflt)
+    colnames(qflt_df) <- c("FLT", "GRE", "LIG", "MOW", "RED", "SQD", "TRS", "TRT", "WHS")
+    qflt_df <- tibble::add_column(qflt_df, "Metier" = rownames(qflt_df), .before = "FLT")
+    cFre_df <- ecoParam()$cFre * 1000 * rowSums(CMS) #  not working if more than one combination I think
+    GVL_df <- GVL_list[[2]][1:9,]
+    cVarUE_df <- ecoParam()$cVarUE * shotNumber()
+    names(cVarUE_df) <- rownames(qflt_df)
+    GOS <- as.data.frame(t(GOS))
+    GOS$effortID <- GVL$effortID
     
-    # print("GVL_df")
-    # print(GVL_df)
+    # fix to remove plot not found error at start, need to understand it a bit more
+    #TODO what is going on here? Not even sure I am plotting the right thing
+    output$eco_plot <- renderPlot({
+      #req(GOS_thresh) # maybe
+      # print(biom_list()[[1]])
+      # print(GOS_thresh())
+      
+      plot_dat <- filter(biom_list()[[1]], effortID %in% effortID)
+      
+      ggplot(plot_dat)+
+        geom_line(aes(x = metiers, y = effort, group = effortID), alpha = .05) +
+        scale_y_continuous(name = "effort scalar") +
+        theme_bw()
+    })
     
-    # sum species by group of similar effort ID to get a GVL per metier
-    GVL <- aggregate(. ~ effortID, FUN=sum, data=GVL_df) 
-    # this is the base of my economic dataframe, which is lighter and separated from the biomass dataframe
-    # print("GVL")
-    # print(GVL)
-    # print(1.3)
-    # Removing share of the crew first
-    NVL <- GVL
-    NVL[,-1] <- NVL[,-1] * (1 - ecoParam()$cShr) 
-    
-    # print("GVL minus crew share")
-    # print(NVL)
-    
-    #removing freight cost from NVL as they are both matrix of the same size
-    NVL[,-1] <- NVL[,-1] - t(cFre)
-    
-    # print("NVL after freight")
-    # print(NVL)
     
     ## Alternate calculation, using cost per day from Sean
     
@@ -778,75 +781,21 @@ cFre_df <- ecoParam()$cFre * 1000 * rowSums(CMS) #  not working if more than one
     # print("total costs")
     # print(totalCosts)
     # print(1.4)
+    
+    NVL <- GVL
+    NVL[,-1] <- NVL[,-1] * (1 - ecoParam()$cShr)
+    NVL[,-1] <- NVL[,-1] - t(cFre)
+    
     GOS_Sean <- NVL[,-1] - totalCosts
     
     GOS_Sean <- as.data.frame(t(GOS_Sean))
     colnames(GOS_Sean) <- unique(GVL$effortID)
     
-    # print("GOS Sean")
-    # print(GOS_Sean)
-    
-    # to display intermediate steps
-    cVarUE_df <- ecoParam()$cVarUE * shotNumber()
-    names(cVarUE_df) <- rownames(qflt_df)
-    
-    # now, to get the rest
-    # since crew share is removed first now, var names are wrong but no need to find new names I guess
-    # removing variable costs, annual in aud
-    rtbs <- apply(as.matrix(NVL),1, #  no days * no vessel is replaced by of no shot at fleet level
-                  function(x) x[2:15] - (ecoParam()$cVarUE * shotNumber()  #ecoParam()$noDay * vesselNumber() *#ecoParam()$noVessel *
-                                         * as.numeric(filter(object_alive, effortID == as.numeric(x[1]))[1,4:17])))
-    
-    # print("rtbs")
-    # print(rtbs)
-    # print(2)
-    # Removing fixed cost from what's left (already scaled and include capital costs)
-    GOS <- apply(rtbs,2, function(x) x - ecoParam()$cFix * vesselNumber())
-    
-    # Crew share removed earlier from GVL, now to calculate it
-    wage_FTE <-  ecoParam()$cShr*GVL[,-1]/(ecoParam()$noCrew * vesselNumber())
-    # print("wage")
-    # print(wage_FTE)
-    
-    wage <- as.data.frame(wage_FTE)
-    wage$effortID <- GVL$effortID
-    # colnames(wage) <- unique(GVL$effortID)
-    # print("wage")
-    # print(wage)
-    
-    # Now formating different var to display in tables
-    GOS <- as.data.frame(t(GOS))
-    GOS$effortID <- GVL$effortID
-    # print("GOS")
-    # print(GOS)
-    
-
-    # print(3)
-    # fix to remove plot not found error at start, need to understand it a bit more
-    output$eco_plot <- renderPlot({
-      #req(GOS_thresh) # maybe
-      # print(biom_list()[[1]])
-      # print(GOS_thresh())
-      
-      plot_dat <- filter(biom_list()[[1]], effortID %in% effortID)
-      
-      # print(plot_dat)
-      ggplot(plot_dat)+
-        geom_line(aes(x = metiers, y = effort, group = effortID), alpha = .05) +
-        # facet_wrap(.~threshold) +
-        scale_y_continuous(name = "effort scalar") +
-        theme_bw()
-      # print(4)
-      
-
-      
-
-    })
     # print(GOS)
     # print(dim(GOS))
     
     return(list(GOS,wage,CMS_df,qflt_df,GVL_df,
-                GVL,rtbs,wage_FTE,object_alive, cFre_df,
+                GVL,NULL,NULL,object_alive, cFre_df,
                 cVarUE_df,GOS_Sean))
     
     
