@@ -73,7 +73,7 @@ computeGVL <- function(CMS, object_alive, fishPrice){
 #' @description
 #' This function calculates the gross operative surplus of each metier per effort 
 #' combination. It first removes the crew share from the GVL, then removes the 
-#' additional costs for freight, variable and fixed. Freight costs are calculated 
+#' additional costs for freight, variable, fixed and capitals. Freight costs are calculated 
 #' with 'computeFre'. Variable costs come from the number of shot per metier, 
 #' inputed by the user. Fixed costs are inputed by the user and scaled down to 
 #' take into account that only the Eastern fisheries are modelled here.
