@@ -3,7 +3,8 @@ library(shiny)
 library(shinydashboard)
 library(tidyverse)
 library(shinyWidgets)
-library(dplyr)
+# library(dplyr)
+library(janitor)
 source("equations.R")
 source("simLoop.R")
 
@@ -462,10 +463,17 @@ server = function(input, output) {
     
     res <- simLoop(effortMatrix = mult_vec, estimation.MSP = estimation.MSP,
                    groups = groups, P.prey = P.prey, E.Fleet = E.Fleet)
-    # TODO less hardcoding
-    biom0 <- readRDS("res/biom0_2019.RDS")
-    res$biom0 <- rep(biom0,(dim(res)[1]/9))
-    res$effortID <-  rep(1:(dim(res)[1]/9), each = 9)
+    
+    biom0 <- simLoop(effortMatrix = rep(0,14), estimation.MSP = estimation.MSP, 
+                     groups = groups, P.prey = P.prey, E.Fleet = E.Fleet)$biomass
+
+    res <- res %>% 
+      mutate(biom0 = biom0,
+             biom_thresh = biomass/biom0,
+             effortID = rep(1:(dim(res)[1]/9), each = 9))
+    # 
+    # res$biom0 <- rep(biom0,(dim(res)[1]/9))
+    # res$effortID <-  rep(1:(dim(res)[1]/9), each = 9)
     loaded_object(res)
     print("Simulation ran successfully.")
   })
