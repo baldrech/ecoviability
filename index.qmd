@@ -1,31 +1,266 @@
 ---
-title: todo list
+title: Ecoviability
 author: RF
 editor_options: 
   chunk_output_type: console
 ---
 
+```{r, echo = F, message=FALSE, }
+# the cpp part of the surplus model was turned into a R package for parallel work
+# remotes::install_github("baldrech/RcppSimEffort")
 
-For this project I need:
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(RcppSimEffort)
+source("equations.R")
+source("simLoop.R")
+groups <- 'BareCode_MSPM_new/data/Main_metier_Ratpack_clean_FishBase.csv'
+P.prey <- 'BareCode_MSPM_new/data/Pprey_Ratpack_Atlantis.csv'
+E.Fleet <- 'BareCode_MSPM_new/data/Effort_metier_Ratpack.csv'
 
-some code running the model in R with just changing the effort. Could have a slot to input the param object
+a <- get(load("res/Output.RData"))
+estimation.MSP <- output_NR$out
 
-use optimparallel to find solution?
-run the model to find best ecological threshold
+qflt   <- estimation.MSP$q
+currentF <- as.numeric(read.csv(E.Fleet)[34,-1])
 
-the key is to get some dataframe of effort combination and then treat it in the app
-however if the dataframe is too big it doesn't work so need to create a subset
+knitr::opts_chunk$set(eval = FALSE)
+```
 
-could remake the app so the user decides the effort and it runs the model / display results
 
-and on the side an algo to find the solution that require lots of computing and parallel power
 
-for the algo I need to write a function that check biom threshold agains value and eco threshold against value and return a value that I need to minimise or maximise for the optim parallel threshold
+The SESSH is a fisheries composed of 14 metiers and targets 9 species
 
-Actually if biom threshold is not met > return 0
-If eco threshold is not met > return difference to positive as a negative number
-otherwise return sums of revenue 
-the algo looks for a maxima in this
+```{r, eval = T, echo = F}
+component_df <- data.frame("Metier" = c("FLTDanishSeiene102030", "FLTDanishSeiene60", "FLTTrawl10",
+                           "FLTTrawl2060", "FLTTrawl30", "HK_LIG", "Mixed", "MWOTrawl102060", 
+                           "MWOTrawl30", "TrawlLIG", "TrawlRED", "WHSDanishSeine20", 
+                           "WHSDanishSeine60", "WHSTrawl1020"),
+                           "Species" = c("FLT", "GRE", "LIG", "MOW", "RED", "SQD", "TRS", "TRT",
+                                         "WHS", rep(NA,5)))
+  
+#knitr::kable(component_df, caption = "components")
+
+
+qflt_color <- ceiling(qflt)
+plot_dat <- reshape2::melt(qflt_color)
+plot_dat$value <- as.factor(plot_dat$value)
+colnames(plot_dat) <- c("Metier","Species","Fished")
+
+ggplot(plot_dat) +
+  geom_tile(aes(y = Metier, x = Species, fill = Fished))
+
+```
+
+
+
+The eco-viability of such multispecies / multi gear fisheries can be divided into three components:
+
+- ecological viability: threshold where the SSB should not fall below
+
+- economic viability: threshold where fishing companies should be able to make sufficient profits to cover all their costs 
+
+- social viability: threshold wage to keep fishing crews active
+
+
+The objective here is to find a combination of metier effort allowing all three threshold to be reached simultaneously.
+
+To do so, the Surplus Model is run over an array of effort combination.
+These effort combination scales up or down the latest effort values from ABARES and allows to do multiple projection in time of possible future efforts.
+The model outputs biomass per species at equilibrium which is used to calculate the three thresholds. 
+
+# Ecoviability
+
+## Biomass threshold 
+
+Here the biomass threshold is the fraction of pristine biomass $B_0$ which all species must reach to be considered as a viable option with $B_0$ being calculated as the biomass output of the surplus model with all metier effort set to 0.
+
+## Economic threshold
+
+The model's output concerns the Eastern part of the SESSH whereas costs parameters encompass the entire fished area (East and West). Costs based on effort such as variable costs are not affected since the effort used is only the eastern one. However fixed and capital costs are over-estimated if we look at the East only. Here we scale down these costs by comparing the model's gross value across all metier and species and the empirical value using the year 2018-2019 for reference.
+
+Which is $31066740.22 / 48888090 = 0.6354664$
+
+Therefore, in the calculations of the net operating surplus, fixed and capital costs are used at 63.5% of their value.
+
+The economic threshold considers all effort combination of metier validating the biomass threshold and calculates the net operating surplus $NOS$ using the catch output produced by the model.
+
+First the catch per metier $CMS$ is calculated such as 
+
+$$CMS_{sp,m} = biomass_{sp} . q_{sp,m} . effort_{m} . effortScalar_m$$
+
+
+
+$biomass_{sp}$ is the output of the production multispecies model. $effort_m$ is the effort per metier used in the production multispecies model (latest ABARES effort value) used conjointly with the $effortScalar_m$ to scale up or down the base effort to simulate different effort values per metier. Finally $q_{sp,m}$ is the catchability of each metier. 
+
+$CMS$ is used to calculate the gross value per species $GVL_{sp}$
+
+$$GVL_{sp,m} = CMS_{sp,m} . price_{sp}$$
+
+The proportion allocated to the crew is then removed from a $GVL$ summed over species.
+
+$$NVL_m = GVL_m . (1-cshr_m)$$
+
+The $NVL$ is then used to calculate the return to be shared $rtbs$, shared between metier benefit and its costs
+
+$$rtbs_m = NVL_m - cVARUE_m - cFREIGHT_m$$
+
+with $cVARUE = shots_{day} . fuel_{shot} . no_{day} . no_{vessel} . effortScalar$
+
+and $cFREIGHT = CMS . freight_{rate}$
+
+Is then subtracted fixed and capital costs $cFix$ to obtain the gross operating surplus $GOS$
+
+$$GOS_m = rtbs_m - cFix_m . noVessel_m$$
+
+Finally the $NOS$ is obtained by removing the deprecation costs $cDep$ from $GOS$
+
+$$NOS_m = GOS_m(1- cDep_m)$$
+
+At the moment deprecation costs are not included in the app. Any effort combination yielding a $GOS$ over the economic threshold defined by the user will be stored and displayed in the plot.
+
+## Social threshold
+
+$cshr$ can be used to calculate the wages of the crew to determine if they are attractive enough. This is metier specific.
+
+$$wage_{crew} = \frac{cshr * GVL}{no_{crew}*no_{vessel}}$$
+All effort combination yielding wages over the social threshold will be stored and saved as they will have succeeded past the 3 threshold and be determined eco-viable.
+
+# Rshiny app
+
+```{r, eval = T, echo = F}
+
+my_data <- data.frame("Description" = c("Number of vessels in fleet", 
+                                        "Variable cost",
+                                        "Freight cost ",
+                                        "Average share of the crew",
+                                        "Fixed and capital costs",
+                                        "Deprecation cost",
+                                        "Average number of crew member",
+                                        "Average number of days at sea"),
+                      "Unit" = c("unit",
+                                 "per vessel per day in aud",
+                                 "aud per kg",
+                                 "proportion",
+                                 "annual per vessel",
+                                 "proportion",
+                                 "per vessel",
+                                 "annual per vessel"))
+
+
+
+knitr::kable(my_data, caption = "Necessary inputs for the Rshiny app, all parameters have default values")
+
+```
+
+## Launching the app
+
+The first block of this document contains the necessary files for the app, it needs to be run first.
+The app can load objects from within, so one can select any RDS file containing a dataframe such as:
+
+```{r}
+object <- readRDS("res/currentEffort.rds")
+knitr::kable(object[,1:7])
+```
+
+
+```{r}
+shiny::runApp("app.R")
+```
+
+## app documentation
+
+The main function of the app is to be able to pick the values for each threshold and apply to the current model output loaded in the app. The app can also run the model itself if one wishes to explore a new set of effort combinations. It also displays the details of cost and revenues per fleets and if they make the theshold.
+
+
+# Model
+
+## Test running the model
+
+```{r}
+# source("BareCode_MSPM_new/Tools.R")
+# C.Fleet <-'BareCode_MSPM_new/data/Catch_Ratpack_metier.csv'
+# External_catch <- 'BareCode_MSPM_new/data/East_Total_Extra_Catch.csv'
+
+get(load("res/Output.RData"))
+estimation.MSP <- output_NR$out
+
+effortMatrix <- rep(1,14)
+res <- simLoop(effortMatrix = effortMatrix, estimation.MSP = estimation.MSP, groups = groups, P.prey = P.prey, E.Fleet = E.Fleet)
+```
+
+## Test ecoviability
+
+Data frame for all parameters, same as in the app, could link both.
+
+```{r}
+param_fleet<- data.frame("name" = c("DS","TW","GHK"),
+                         "cVarUE" = c(112.64,1357.76,765.81),
+                         "cFre" = c(0.207,0.175,0.043669),
+                         "cShr" = c(0.402636533,0.229013145,0.428),
+                         "fixed_cost" = c(85536,144128,114604.4),
+                         "capital_cost" = c(305987,506098,331460.6),
+                         "deprecation_cost" = c(0.02,0.03,0.06),
+                         "noCrew" = c(3.5,4,2),
+                         "noDay" = c(111,145,80)) %>% 
+  mutate(cFix = 0.6354664 * fixed_cost + 0.079 *capital_cost) # only east approximation
+
+
+param_metier <- param_fleet %>% 
+  slice(rep(1,2),
+        rep(2,3),
+        rep(3,2),
+        rep(2,4),
+        rep(1,2),
+        rep(2,1)) %>% 
+  mutate(name = c( "FLTDanishSeiene102030", "FLTDanishSeiene60", "FLTTrawl10", 
+                   "FLTTrawl2060", "FLTTrawl30", "HK_LIG", "Mixed", "MWOTrawl102060",
+                   "MWOTrawl30", "TrawlLIG", "TrawlRED", "WHSDanishSeine20",
+                   "WHSDanishSeine60", "WHSTrawl1020"),
+         no_vessel = c(9.72,6.71,6.53,9.94,3.46,2,10,0.86,0.34,6.5,0.25,0.5,6.69,1.02),
+         no_shot = c(4653,2118,820,2931,1214,214,5574,128,161,854,46,103,2278,218))
+
+
+param_species <- data.frame("name" = c("FLT", "GRE", "LIG", "MOW", "RED", "SQD", "TRS", "TRT", "WHS"),
+                            "price" = c(6.2,2.4,6.58,3.42,3.34,3.79,2.03,3.3,2.55))
+
+
+```
+
+Function similar to the app, calculating the ecoviability threshold. If the argument `threshold_df` is FALSE (default), the function returns a fitness value to be maximised by the algorithm looking for the best solutions. If `threshold_df` is TRUE, it returns the dataframe with the different values of biomass and money made.
+
+```{r}
+vary <- runif(14,.5,1.5)
+ecoviability(vary = vary, qflt = qflt, currentF = currentF, estimation.MSP = estimation.MSP)
+```
+
+## Exploring the effort space
+
+To look for the solution quickly, we can use parallel algorithms.
+We have two choices, local optimisation algorithm running real fast in parallel but will easily get stuck if the the output of `ecoviability` is discrete. That's the situation now since many combination of effort can lead to the same number of species going extinct and metier going bankrupt as we judge their fitness on the basis of thresholds. This can me modified if instead of looking at threshold we look at maximizing the profit and the fish biomass but might lead to weird results where having one dominant species and one dominant fisheries is the best solution. Can be tweaked by editing `ecoviability` output. The second solution is to use genetic algorithm which cannot work in parallel as every next step depends on the previous one. However the solution is explored organically which each step informing on the where the solution could be. Can be made in parallel with parallel exploration with different starting point for example.
+
+The following genetic algorithm is part of the latter and works well.
+
+```{r}
+library(GA)
+
+vary <- runif(14,.5,1.5)
+lowerB <- rep(.5,14)
+upperB <- rep(1.5,14)
+
+result <- ga(type = "real-valued", 
+             fitness = ecoviability, qflt, currentF, estimation.MSP,
+             lower = lowerB, upper = upperB,
+             suggestions = vary, # starting point
+             maxiter = 10, # maximum number of generations
+             run = 5) # stops if fitness doesn't vary afte X generations
+
+summary(result)
+result@solution
+
+ecoviability(result@solution[1,], qflt, currentF, estimation.MSP, threshold_df = T)
+```
 
 
 What is done
@@ -34,135 +269,35 @@ What is done
 
 - app reading an RDS object being a dataframe of effort combination and expected biomass caught
 
-- from the dataframe the app calculate how many species will reach the biomass threshold (user input) and what effort combination yield a economic and social threshold (user inputed)
+- from the dataframe the app calculate how many species will reach the biomass threshold (user input) and what effort combination yield a economic and social threshold (user input)
 
 - the app will be slow if the dataframe is huge
 
 - can run a simulation with user input effort from the app (overwrite any loaded object)
 
+- algo looking for best solution without the app
+
 TODO
 
 - make equation being available to edit by user
 
-- algo looking for best solution without the app
 
 
 
-
-
-Email:
-
-Apologies for the delay in my work. After not being able to reach an aggreement about the fisheries output for so long I moved my focus to other jobs and then coulnot find time to finalise the project.
-On top of that having the 14 fisheries together made it really hard to process any kind of output through a shinyapp so I decided to reframe the entire project and make it completly modulable for any need you might have in the future with this app.
-
-Therefore you will find a documentation on how to use an algorithm which loops the surplus model, which might need to get updated every time the surplus model is. This runs in parallel and can be done to find solution analytically. 
-
-The shiny app is also avaialble once you have selected a desiered effort space for all fisheries. This allows to further refine the solution and see the economic impact. The app contains the functions calculating the three threshold and can be updated / changed if necessary.
-The input can also be given raw with basic metrics or alredy processed as with Shawn ouptput. THis is in fact a frame being able to take any equation and output stuff so you can use that for anything
-
-Once again, apologies for the delay, this project is not exactly what you need and has taken way more time than the original one month contract but hopefully it will help you progress towards a better eco viability of the sessh
-
-# Test running the model
-
-```{r}
-source("BareCode_MSPM_new/Tools.R")
-# remotes::install_github("baldrech/RcppSimEffort")
-library(RcppSimEffort)
-
-groups <- 'BareCode_MSPM_new/data/Main_metier_Ratpack_clean_FishBase.csv'
-P.prey <- 'BareCode_MSPM_new/data/Pprey_Ratpack_Atlantis.csv'
-E.Fleet <- 'BareCode_MSPM_new/data/Effort_metier_Ratpack.csv'
-# C.Fleet <-'BareCode_MSPM_new/data/Catch_Ratpack_metier.csv'
-# External_catch <- 'BareCode_MSPM_new/data/East_Total_Extra_Catch.csv'
-
-get(load("res/Output.RData"))
-estimation.MSP <- output_NR$out
-
-# biom0 <- readRDS("res/biom0.RDS") # loading pristine state
-
-
-# effort_seq <-seq(0,4,length.out = 14)
-effort_seq <- c(0.5,1)
-
-effortMatrix <- rep(effort_seq[1],14)
-
-
-
-
-
-# function used in the foreach
-simLoop <- function(effortMatrix, estimation.MSP, groups, P.prey, E.Fleet)
-{
-  # from MSP
-K      <- exp(estimation.MSP$Parameters$logK)
-r      <- exp(estimation.MSP$Parameters$logr)
-lambda <- exp(estimation.MSP$Parameters$loglambda)
-qflt   <- estimation.MSP$q
-C.biom  <- estimation.MSP$Report
-
-## Effort Arrangement
-EFleet <- read.csv(E.Fleet) ## Predators in columns and prey on rows
-order.flt <- colnames(EFleet[, -1])
-Nflts <- length(order.flt)
-
-# setting up multiplier vector for the effort
-mult <- rep(1,length(order.flt))
-# mult   <- mult[1 : length(order.flt)]
-# Effort <- colMeans(tail(EFleet[, -1]), na.rm = TRUE)  * mult
-# predator prey interactions
-Pprey  <- as.matrix(read.csv(P.prey, row.names = 1, stringsAsFactors = FALSE)) ## Predators in columns and prey on rows
-Pprey[is.na(Pprey)] <-0
-main      <- read.csv(groups)
-order.sps <- as.character(main$Code)  ## This will set the species order
-Nsp <- length(order.sps)
-
-Xp = main$Xp
-mu = main$mu
-Eff = main$Efficiency
-
-start <- "Current Estimation" #"At MSY Level" ## it also can be 'Current Estimation'
-  
-  
-  mult   <- effortMatrix[1 : length(order.flt)]
-  Effort <- colMeans(tail(EFleet[, -1]), na.rm = TRUE)  * mult
-
-
-res <- .sim.eff(K = K,
-                r = r, 
-                qflt = qflt,
-                Time = 5000, 
-                Effort = Effort, 
-                Nsp = Nsp,
-                Nflts = Nflts,
-                p.asym = lambda, 
-                Pprey = Pprey, 
-                Xp = Xp, 
-                mu = mu, 
-                Eff = Eff, 
-                np = 2, 
-                predation = FALSE, 
-                v.noise = TRUE, 
-                step = 0.1, 
-                C.biom = C.biom, 
-                start = start)
-
-names(effortMatrix) <- order.flt
-
-biores <- data.frame("biomass" = res$B3, "production" = res$P3, "species" = order.sps)
-effortOutput <- matrix(rep(effortMatrix, Nsp), nrow = Nsp, byrow = T)
-colnames(effortOutput) <- order.flt
-return(cbind(biores, effortOutput))
-}
-
-res <- simLoop(effortMatrix = effortMatrix, estimation.MSP = estimation.MSP, groups = groups, P.prey = P.prey, E.Fleet = E.Fleet)
-```
-
+### Discarded parallel code
 
 ```{r}
 # Doing it in parallel with only 2 efforts
 
 library(foreach)
 library(doParallel)
+source("simLoop.R")
+get(load("res/Output.RData"))
+estimation.MSP <- output_NR$out
+
+groups <- 'BareCode_MSPM_new/data/Main_metier_Ratpack_clean_FishBase.csv'
+P.prey <- 'BareCode_MSPM_new/data/Pprey_Ratpack_Atlantis.csv'
+E.Fleet <- 'BareCode_MSPM_new/data/Effort_metier_Ratpack.csv'
 
 global_effort <- c(.5,1)
 effort_combinations <- as.matrix(expand.grid(replicate(14, global_effort, simplify = FALSE)))
@@ -176,22 +311,6 @@ clusterEvalQ(cl, library(RcppSimEffort))
 
 # Export necessary objects to workers
 clusterExport(cl, c("global_effort", "simLoop"))
-
-# # Parallel execution of simLoop
-# results <- foreach(
-#   effortVal = global_effort,
-#   .combine = rbind,
-#   .export = c("estimation.MSP", "groups", "P.prey", "E.Fleet")
-# ) %dopar% {
-#   effortMatrix <- rep(effortVal, times = 14)
-#   simLoop(
-#     effortMatrix,
-#     estimation.MSP = estimation.MSP,
-#     groups = groups,
-#     P.prey = P.prey,
-#     E.Fleet = E.Fleet
-#   )
-# }
 
 # Parallel execution of simLoop
 results <- foreach(row = 1:nrow(effort_combinations), .combine = rbind) %dopar% {
@@ -225,30 +344,128 @@ saveRDS(results,"res/testRes.rds")
 
 ```
 
-Run the app
+
+
+
+
+
+
 
 
 ```{r}
-# object <- readRDS("res/currentEffort.rds") # this object is already set up with id and biom0
-# object <- readRDS("res/testRes.rds")
-# object <- object[1:90,]
-# object <- readRDS("res/currentEffort.rds")
+library(parallel)
+library(dplyr)
+library(GA)
+source("simLoop.R")
+source("equations.R")
+
 groups <- 'BareCode_MSPM_new/data/Main_metier_Ratpack_clean_FishBase.csv'
 P.prey <- 'BareCode_MSPM_new/data/Pprey_Ratpack_Atlantis.csv'
 E.Fleet <- 'BareCode_MSPM_new/data/Effort_metier_Ratpack.csv'
-# C.Fleet <-'BareCode_MSPM_new/data/Catch_Ratpack_metier.csv'
-# External_catch <- 'BareCode_MSPM_new/data/East_Total_Extra_Catch.csv'
 
 get(load("res/Output.RData"))
 estimation.MSP <- output_NR$out
-
-
-
 qflt   <- estimation.MSP$q
 currentF <- as.numeric(read.csv(E.Fleet)[34,-1])
+vary <- rep(.1,14)
+vary <- runif(14,.5,1.5)
+vary <- vary + vary*.1
 
-shiny::runApp("app.R")
+#test
+ecoviability(vary, qflt, currentF, estimation.MSP)
+
+# Set the number of cores (adjust as needed)
+num_cores <- detectCores() - 2
+
+# Create a cluster
+cl <- makeCluster(num_cores)
+setDefaultCluster(cl = cl)
+
+# Export necessary variables and functions to workers
+clusterExport(
+  cl,
+  varlist = c("vary", "qflt", "currentF", "estimation.MSP", "ecoviability",
+              "E.Fleet","P.prey","groups", "param_metier", "param_species", 
+              "simLoop", "sim.eff","computeCMS","computeFRE","computeGVL","computeGOS","computeWage"),
+  envir = environment()
+)
+
+# Load necessary libraries on workers
+clusterEvalQ(
+  cl, {
+    libraries <- c("RcppSimEffort", "optimParallel", "dplyr")
+    for (lib in libraries) {
+      if (!requireNamespace(lib, quietly = TRUE)) {
+        install.packages(lib, dependencies = TRUE)
+      }
+      library(lib, character.only = TRUE)
+    }
+  }
+)
+
+clusterEvalQ(cl, {
+  print("Checking library loading on worker")
+  libraries <- c("RcppSimEffort", "optimParallel", "dplyr")
+  for (lib in libraries) {
+    if (!requireNamespace(lib, quietly = TRUE)) {
+      install.packages(lib, dependencies = TRUE)
+    }
+    library(lib, character.only = TRUE)
+  }
+})
+
+clusterEvalQ(cl, {
+  result <- 1 + 1
+  print(result)
+})
+
+clusterEvalQ(cl, {
+  library("optimParallel", character.only = TRUE)
+})
+
+clusterEvalQ(cl, {
+  vary <- vary  # Replace NULL with actual values
+
+})
+
+clusterEvalQ(cl, {
+  ls()
+})
+
+clusterEvalQ(cl, {
+  library(RcppSimEffort)
+  # library(optimParallel)
+  library(GA)
+  library(dplyr)
+  library(tidyr)
+})
+# Parallel optimization using optimParallel
+optim_result <- optimParallel::optimParallel(
+  par = vary,
+  fn = ecoviability,
+  qflt = qflt,
+  currentF = currentF,
+  estimation.MSP = estimation.MSP,
+  method = "DEoptim",
+  # lower = rep(.1,14),
+  # upper = rep(2,14),
+  parallel = list(loginfo = TRUE, forward = TRUE, cl = cl)
+)
+
+# Stop the cluster when done
+stopCluster(cl)
+print(optim_result)
+
+
+result <- ga(type = "real-valued", fitness = ecoviability, qflt, currentF, estimation.MSP,
+             lower = rep(.9,14), upper = rep(1.1,14),
+             maxiter = 5,
+             parallel = cl)
+
+
 ```
 
-app works, the issue is that it is slow when handling lots of data
-
+algo? Actually if biom threshold is not met > return 0
+If eco threshold is not met > return difference to positive as a negative number
+otherwise return sums of revenue 
+the algo looks for a maxima in this
